@@ -2,6 +2,7 @@ package map2arrow
 
 import (
 	"fmt"
+
 	"github.com/apache/arrow/go/v13/arrow"
 )
 
@@ -80,9 +81,6 @@ func Map2Arrow(m map[string]interface{}) *arrow.Schema {
 	var fields []arrow.Field
 	for _, c := range f.Children() {
 		fields = append(fields, c.field)
-	}
-	for i, field := range fields {
-		fmt.Printf("%v : %+v\n", i, field)
 	}
 	return arrow.NewSchema(fields, nil)
 }
