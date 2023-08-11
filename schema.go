@@ -1,6 +1,7 @@
 package map2arrow
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/apache/arrow/go/v13/arrow"
@@ -15,11 +16,16 @@ type FieldPos struct {
 	AppendFunc   func(val interface{}) error
 	children     []*FieldPos
 	index, depth int32
+	err          error
 }
+
+var ErrUndefinedFieldType = errors.New("could not determine type from unpopulated field")
 
 func NewFieldPos() *FieldPos { return &FieldPos{index: -1} }
 
 func (f *FieldPos) Name() string { return f.name }
+
+func (f *FieldPos) Error() error { return f.err }
 
 func (f *FieldPos) Child(index int) (*FieldPos, error) {
 	if index < len(f.Children()) {
@@ -75,25 +81,40 @@ func (f *FieldPos) GetValue(m map[string]interface{}) interface{} {
 	return value
 }
 
-func Map2Arrow(m map[string]interface{}) *arrow.Schema {
+// Map2Arrow returns an Arrow schema generated from the structure/types of
+// a map[string]interface{}. It is expected that the input map be fully populated;
+// an error is returned along with the schema if undefined fields are found, any unpopulated
+// fields or slices will be defined as arrow.Binary to avoid data loss if the schema is still used.
+func Map2Arrow(m map[string]interface{}) (*arrow.Schema, error) {
 	f := NewFieldPos()
 	mapToArrow(f, m)
 	var fields []arrow.Field
 	for _, c := range f.Children() {
 		fields = append(fields, c.field)
 	}
-	return arrow.NewSchema(fields, nil)
+	err := errWrap(f)
+	return arrow.NewSchema(fields, nil), err
 }
 
-func mapToArrow(f *FieldPos, m map[string]interface{}) error {
+func errWrap(f *FieldPos) error {
+	var err error
+	if f.err != nil {
+		err = errors.Join(f.err)
+	}
+	if len(f.Children()) > 0 {
+		for _, field := range f.Children() {
+			err = errors.Join(errWrap(field))
+		}
+	}
+	return err
+}
+
+func mapToArrow(f *FieldPos, m map[string]interface{}) {
 	for k, v := range m {
 		child := f.NewChild(k)
 		switch t := v.(type) {
 		case map[string]interface{}:
-			err := mapToArrow(child, t)
-			if err != nil {
-				return err
-			}
+			mapToArrow(child, t)
 			var fields []arrow.Field
 			for _, c := range child.Children() {
 				fields = append(fields, c.field)
@@ -101,16 +122,17 @@ func mapToArrow(f *FieldPos, m map[string]interface{}) error {
 			child.field = arrow.Field{Name: k, Type: arrow.StructOf(fields...), Nullable: true}
 		case []interface{}:
 			if len(t) <= 0 {
+				child.err = fmt.Errorf("%v : %v", ErrUndefinedFieldType, child.NamePath())
 				child.field = arrow.Field{Name: k, Type: arrow.BinaryTypes.Binary, Nullable: true}
 			} else {
-				et, err := sliceElemType(child, t)
-				if err != nil {
-					return err
-				}
+				et := sliceElemType(child, t)
 				child.field = arrow.Field{Name: k, Type: arrow.ListOf(et), Nullable: true}
 			}
+		case nil:
+			child.err = fmt.Errorf("%v : %v", ErrUndefinedFieldType, child.NamePath())
+			child.field = arrow.Field{Name: k, Type: goType2Arrow(child, v), Nullable: true}
 		default:
-			child.field = arrow.Field{Name: k, Type: goType2Arrow(v), Nullable: true}
+			child.field = arrow.Field{Name: k, Type: goType2Arrow(child, v), Nullable: true}
 		}
 	}
 	var fields []arrow.Field
@@ -118,39 +140,33 @@ func mapToArrow(f *FieldPos, m map[string]interface{}) error {
 		fields = append(fields, c.field)
 	}
 	f.field = arrow.Field{Name: f.name, Type: arrow.StructOf(fields...), Nullable: true}
-	return nil
 }
 
-func sliceElemType(f *FieldPos, v []interface{}) (arrow.DataType, error) {
+func sliceElemType(f *FieldPos, v []interface{}) arrow.DataType {
 	switch ft := v[0].(type) {
 	case map[string]interface{}:
 		child := f.NewChild(f.name + ".elem")
-		err := mapToArrow(child, ft)
-		if err != nil {
-			return nil, err
-		}
+		mapToArrow(child, ft)
 		var fields []arrow.Field
 		for _, c := range child.Children() {
 			fields = append(fields, c.field)
 		}
-		return arrow.StructOf(fields...), nil
+		return arrow.StructOf(fields...)
 	case []interface{}:
 		if len(ft) <= 0 {
-			return arrow.BinaryTypes.Binary, nil
+			f.err = fmt.Errorf("%v : %v", ErrUndefinedFieldType, f.NamePath())
+			return arrow.BinaryTypes.Binary
 		}
 		child := f.NewChild(f.name + ".elem")
-		et, err := sliceElemType(child, ft)
-		if err != nil {
-			return nil, err
-		}
-		return arrow.ListOf(et), nil
+		et := sliceElemType(child, ft)
+		return arrow.ListOf(et)
 	default:
-		return goType2Arrow(v), nil
+		return goType2Arrow(f, v)
 	}
-	return nil, nil
+	return nil
 }
 
-func goType2Arrow(gt any) arrow.DataType {
+func goType2Arrow(f *FieldPos, gt any) arrow.DataType {
 	var dt arrow.DataType
 	switch gt.(type) {
 	// either 32 or 64 bits
@@ -202,6 +218,7 @@ func goType2Arrow(gt any) arrow.DataType {
 	case complex128:
 		// TO-DO
 	case nil:
+		f.err = fmt.Errorf("%v : %v", ErrUndefinedFieldType, f.NamePath())
 		dt = arrow.BinaryTypes.Binary
 	}
 	return dt

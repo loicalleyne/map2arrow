@@ -13,7 +13,10 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	schema := map2arrow.Map2Arrow(m)
+	schema, err := map2arrow.Map2Arrow(m)
+	if err != nil {
+		fmt.Println(err)
+	}
 	fmt.Println(schema.String())
 }
 
