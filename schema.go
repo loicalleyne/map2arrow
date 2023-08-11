@@ -12,14 +12,13 @@ type FieldPos struct {
 	name         string
 	path         []string
 	field        arrow.Field
-	elem         *FieldPos
 	AppendFunc   func(val interface{}) error
 	children     []*FieldPos
 	index, depth int32
 	err          error
 }
 
-var ErrUndefinedFieldType = errors.New("could not determine type from unpopulated field")
+var ErrUndefinedFieldType = errors.New("could not determine type of unpopulated field")
 
 func NewFieldPos() *FieldPos { return &FieldPos{index: -1} }
 
